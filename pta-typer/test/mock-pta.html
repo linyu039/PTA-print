@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>PTA 仿真台 · 键盘输入</title>
+<style>
+  body { margin: 0; font: 13px/1.6 "Segoe UI", system-ui, sans-serif; background: #f4f5f7; color: #222; }
+  .page { max-width: 900px; margin: 0 auto; padding: 20px; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  .card { background: #fff; border: 1px solid #dcdfe6; border-radius: 8px; padding: 12px; margin-bottom: 14px; }
+  .editor-shell { border: 1px solid #ccd0d8; border-radius: 6px; overflow: hidden; }
+  .CodeMirror { display: flex; background: #fbfbfc; min-height: 180px; }
+  .gutter { width: 44px; background: #f0f1f4; border-right: 1px solid #e2e4ea; color: #9aa0ac; text-align: right; padding: 8px 6px; font: 12px/1.6 Consolas, monospace; user-select: none; }
+  .CodeMirror-code { flex: 1; }
+  .CodeMirror textarea {
+    width: 100%; height: 170px; border: 0; outline: none; resize: none;
+    padding: 8px 10px; box-sizing: border-box; background: transparent;
+    font: 12px/1.6 Consolas, "Cascadia Mono", monospace; color: #2c3038;
+  }
+  .verdict { font-size: 12px; padding: 8px 10px; border-radius: 6px; background: #f0f1f4; }
+  .verdict b { font-weight: 600; }
+  .ok { color: #12805c; }
+  .bad { color: #c0392b; }
+  .kv { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; }
+  .kv span { color: #606770; }
+  .kv b { color: #1a1d22; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h2>PTA 仿真台 · 代码提交（模拟 CodeMirror）</h2>
+
+  <div class="card">
+    <div class="editor-shell">
+      <div class="CodeMirror" id="cm">
+        <div class="gutter" id="gutter">1</div>
+        <div class="CodeMirror-code">
+          <textarea id="code" spellcheck="false" autocomplete="off"></textarea>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="kv" style="margin-bottom:8px">
+      <span>字符数 <b id="vLen">0</b></span>
+      <span>行数 <b id="vLines">0</b></span>
+      <span>paste 事件 <b id="vPaste">0</b></span>
+      <span>insertFromPaste <b id="vFromPaste">0</b></span>
+      <span>insertText <b id="vInsert">0</b></span>
+      <span>keydown <b id="vKey">0</b></span>
+    </div>
+    <div class="verdict" id="verdict">等待输入…</div>
+  </div>
+</div>
+
+<script>
+/* ============ chrome.* stub ============ */
+const store = { cfg: {} };
+let pasteCount = 0;
+let fromPasteCount = 0;
+let insertTextCount = 0;
+let keyCount = 0;
+let enterEaten = 0;
+
+window.__stored = store;
+window.__stats = {
+  get paste() { return pasteCount; },
+  get fromPaste() { return fromPasteCount; },
+  get insert() { return insertTextCount; },
+  get keys() { return keyCount; }
+};
+
+window.chrome = window.chrome || {};
+chrome.runtime = {
+  id: 'mock-extension-id',
+  lastError: null,
+  getManifest: () => ({ version: '1.1.4-mock' }),
+  sendMessage: (msg, cb) => {
+    const done = (res) => setTimeout(() => cb && cb(res), 1);
+    if (!msg) return done({ ok: false });
+
+    if (msg.type === 'PTA_PING') return done({ ok: true, data: 'pong' });
+
+    if (msg.type === 'PTA_KEY') {
+      try { mockKey(msg); done({ ok: true }); }
+      catch (e) { done({ ok: false, error: String(e.message || e) }); }
+      return;
+    }
+    done({ ok: false, error: 'unknown' });
+  }
+};
+chrome.storage = { local: { get: (k, cb) => cb({}), set: (v, cb) => cb && cb() } };
+
+/* ============ 模拟 CDP 键盘 ============ */
+const ta = document.getElementById('code');
+const cmEl = document.getElementById('cm');
+
+/* 给 content.js 一条「有实例」的路径，让它能准确读到全文 */
+cmEl.CodeMirror = { getValue: () => ta.value };
+
+const mockTrail = [];
+function mockLog(msg) {
+  mockTrail.push(msg);
+  if (mockTrail.length > 200) mockTrail.shift();
+}
+
+function syncView() {  document.getElementById('vLen').textContent = ta.value.length;
+  document.getElementById('vLines').textContent = ta.value === '' ? 0 : ta.value.split('\n').length;
+  document.getElementById('vPaste').textContent = pasteCount;
+  document.getElementById('vFromPaste').textContent = fromPasteCount;
+  document.getElementById('vInsert').textContent = insertTextCount;
+  document.getElementById('vKey').textContent = keyCount;
+  const v = document.getElementById('verdict');
+  if (pasteCount > 0 || fromPasteCount > 0) {
+    v.className = 'verdict bad';
+    v.innerHTML = '<b>被检测到粘贴</b> —— paste ' + pasteCount + ' 次，insertFromPaste ' + fromPasteCount + ' 次';
+  } else if (ta.value.length > 0) {
+    v.className = 'verdict ok';
+    v.innerHTML = '<b>干净</b> —— 全部是真实按键，零粘贴事件';
+  } else {
+    v.className = 'verdict';
+    v.textContent = '等待输入…';
+  }
+}
+
+function insertAtCaret(text) {
+  ta.focus();
+  const start = ta.selectionStart;
+  const end = ta.selectionEnd;
+  ta.value = ta.value.slice(0, start) + text + ta.value.slice(end);
+  const pos = start + text.length;
+  ta.selectionStart = ta.selectionEnd = pos;
+  ta.dispatchEvent(new InputEvent('input', {
+    bubbles: true, inputType: 'insertText', data: text
+  }));
+  syncView();
+}
+
+/* 这是对 CDP 的仿真，所以要按真实顺序派发：
+   keydown → input(insertText) → keyup，和真键盘一模一样。 */
+function typeReal(ch) {
+  // 行首空格被吃掉 —— 复现 PTA 的那种「缩进没了」
+  if (ch === ' ' && window.__MOCK_EAT_INDENT__ === true) {
+    const p = ta.selectionStart;
+    const ls = lineStartOf(p);
+    if (ta.value.slice(ls, p).trim() === '') {
+      mockLog('（仿真）行首空格被吃掉');
+      return;
+    }
+  }
+  ta.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true, cancelable: true }));
+  insertAtCaret(ch);
+  // 行内空格被插成两个 —— 复现「if n  %  2  ==  0:」那种双份空格
+  if (ch === ' ' && window.__MOCK_DOUBLE_SPACE__ === true) {
+    insertAtCaret(' ');
+    mockLog('（仿真）空格被插成两个');
+  }
+  ta.dispatchEvent(new KeyboardEvent('keyup', { key: ch, bubbles: true }));
+}
+
+/* 行首位置：光标往前找到最近的换行 */
+function lineStartOf(pos) {
+  const v = ta.value;
+  const i = v.lastIndexOf('\n', pos - 1);
+  return i < 0 ? 0 : i + 1;
+}
+function lineEndOf(pos) {
+  const v = ta.value;
+  const i = v.indexOf('\n', pos);
+  return i < 0 ? v.length : i;
+}
+
+/* 编辑器自己的小动作，用来复现 PTA 那两个毛病：
+   __MOCK_AUTO_INDENT__ = true  → 回车后自动补上一行的缩进（会导致缩进翻倍）
+   __MOCK_EAT_INDENT__  = true  → 行首空格被吃掉（会导致没有缩进） */
+function onEnter() {
+  // 复现「回车被编辑器吞掉」：else: 粘到上一行末尾变成 `n //= 2  else:`
+  if (window.__MOCK_EAT_ENTER__ === true && enterEaten < 1) {
+    enterEaten++;
+    mockLog('（仿真）回车被吞了，没换行');
+    return;
+  }
+  const v = ta.value;
+  const pos = ta.selectionStart;
+  const ls = lineStartOf(pos);
+
+  let autoIndent = '';
+  if (window.__MOCK_AUTO_INDENT__ === true) {
+    const curLine = v.slice(ls, pos);
+    const m = /^[ \t]*/.exec(curLine);
+    autoIndent = m ? m[0] : '';
+  }
+
+  insertAtCaret('\n' + autoIndent);
+  if (autoIndent) mockLog('（仿真）回车 → 自动缩进 ' + autoIndent.length + ' 个空格');
+}
+
+function mockKey(msg) {
+  // 整串一次插入（对应 background 的 Input.insertText），等价输入法上屏
+  if (typeof msg.text === 'string') {
+    mockLog('INSERT ' + JSON.stringify(msg.text).slice(0, 40) + ' +' + msg.text.length + ' 字');
+    ta.focus();
+    insertAtCaret(msg.text);
+    // 一次插入也会被放大 —— 有的编辑器就是这样，空格进两个
+    if (window.__MOCK_DOUBLE_SPACE__ === true && msg.text === ' ') {
+      insertAtCaret(' ');
+      mockLog('（仿真）空格被插成两个（一次插入路径）');
+    }
+    return;
+  }
+  mockLog('KEY ' + (msg.key || JSON.stringify(msg.ch)) + (msg.times ? '#' + msg.times : '') +
+    ' @' + ta.selectionStart + ' len=' + ta.value.length);
+  if (msg.key === 'Enter') {
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
+    onEnter();
+    ta.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
+    return;
+  }
+  if (msg.key === 'Tab') { typeReal('\t'); return; }
+  if (msg.key === 'CtrlA') {
+    ta.focus();
+    ta.selectionStart = 0;
+    ta.selectionEnd = ta.value.length;
+    return;
+  }
+  if (msg.key === 'ShiftEnd') {
+    ta.focus();
+    const e = lineEndOf(ta.selectionStart);
+    const s = Math.min(ta.selectionStart, e);
+    ta.selectionStart = s;
+    ta.selectionEnd = e;
+    return;
+  }
+  if (msg.key === 'CtrlHome') {
+    ta.focus();
+    ta.selectionStart = ta.selectionEnd = 0;
+    return;
+  }
+  if (msg.key === 'Home') {
+    ta.focus();
+    const ls = lineStartOf(ta.selectionStart);
+    let p = ls;
+    if (window.__MOCK_SMART_HOME__ === true) {
+      const lineTxt = ta.value.slice(ls, lineEndOf(ta.selectionStart));
+      const lead = (lineTxt.match(/^[ \t]*/) || [''])[0].length;
+      p = (ta.selectionStart === ls + lead) ? ls : ls + lead;
+    }
+    ta.selectionStart = ta.selectionEnd = p;
+    return;
+  }
+  if (msg.key === 'End') {
+    ta.focus();
+    const p = lineEndOf(ta.selectionStart);
+    ta.selectionStart = ta.selectionEnd = p;
+    return;
+  }
+  if (msg.key === 'ArrowRight') {
+    ta.focus();
+    const n = Math.max(1, msg.times | 0);
+    const p = Math.min(ta.value.length, ta.selectionStart + n);
+    ta.selectionStart = ta.selectionEnd = p;
+    return;
+  }
+  if (msg.key === 'Delete') {
+    const n = Math.max(1, msg.times | 0);
+    for (let i = 0; i < n; i++) {
+      const p = ta.selectionStart;
+      if (ta.selectionStart !== ta.selectionEnd) {
+        ta.value = ta.value.slice(0, p) + ta.value.slice(ta.selectionEnd);
+        ta.selectionStart = ta.selectionEnd = p;
+      } else if (p < ta.value.length) {
+        ta.value = ta.value.slice(0, p) + ta.value.slice(p + 1);
+        ta.selectionStart = ta.selectionEnd = p;
+      } else break;
+    }
+    ta.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentForward' }));
+    syncView();
+    return;
+  }
+  if (msg.key === 'Backspace') {
+    const s = ta.selectionStart, e = ta.selectionEnd;
+    if (s !== e) {
+      ta.value = ta.value.slice(0, s) + ta.value.slice(e);
+      ta.selectionStart = ta.selectionEnd = s;
+    } else if (s > 0) {
+      ta.value = ta.value.slice(0, s - 1) + ta.value.slice(s);
+      ta.selectionStart = ta.selectionEnd = s - 1;
+    }
+    ta.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
+    syncView();
+    return;
+  }
+  if (msg.ch) {
+    for (const ch of String(msg.ch)) typeReal(ch);
+  }
+}
+
+/* ============ PTA 那套检测 ============ */
+
+/* 统计不能只写在 stub 里 —— 真实 CDP 输入不经过 stub。
+   所以这里直接听浏览器派发的真实事件，
+   两条路径（stub / CDP）都能被正确记账。 */
+document.addEventListener('keydown', (e) => {
+  keyCount++;
+  window.__trustedFlags = window.__trustedFlags || [];
+  if (window.__trustedFlags.length < 200) window.__trustedFlags.push(e.isTrusted);
+}, true);
+
+document.addEventListener('input', (e) => {
+  if (e.inputType === 'insertText') insertTextCount++;
+  if (e.inputType === 'insertFromPaste') fromPasteCount++;
+  syncView();
+}, true);
+
+document.addEventListener('paste', (e) => {
+  pasteCount++;
+  syncView();
+  // 真 PTA 会在这里拦掉，仿真台只记账
+}, true);
+
+document.addEventListener('beforeinput', (e) => {
+  if (e.inputType === 'insertFromPaste') {
+    fromPasteCount++;
+    syncView();
+  }
+}, true);
+
+window.__MOCK = {
+  get text() { return ta.value; },
+  get paste() { return pasteCount; },
+  get fromPaste() { return fromPasteCount; },
+  get trail() { return mockTrail.slice(); },
+  reset() {
+    ta.value = ''; pasteCount = 0; fromPasteCount = 0; insertTextCount = 0; keyCount = 0;
+    window.__trustedFlags = [];
+    mockTrail.length = 0;
+    syncView();
+  }
+};
+
+syncView();
+</script>
+
+<script src="../content.js"></script>
+</body>
+</html>

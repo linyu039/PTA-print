@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "PTA 键盘输入模拟",
+  "version": "1.1.4",
+  "description": "把代码按真人打字节奏逐字符输入 PTA 编辑器，不触发任何粘贴事件。",
+  "permissions": ["debugger", "storage", "scripting"],
+  "host_permissions": [
+    "https://pintia.cn/*",
+    "https://*.pintia.cn/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "file:///*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://pintia.cn/*",
+        "https://*.pintia.cn/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*",
+        "file:///*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
