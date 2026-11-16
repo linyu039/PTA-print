@@ -382,7 +382,7 @@ node test\unit-ai-base.mjs
 
 全跑出 `结果：通过 N，失败 0` 才算正常。
 > [!WARNING]
-> **使用前请先读 [DISCLAIMER.md](DISCLAIMER.md)（免责声明）。**
+> **使用前请先读 [DISCLAIMER.md]（免责声明）。**
 >
 > 本项目与 PTA / pintia.cn、浙江大学、哈尔滨工业大学、DeepSeek 均无关联，未获授权或背书。
 > 仅面向个人学习与自动化输入研究；**提交内容的正确性与合规性由使用者自行负责**。
