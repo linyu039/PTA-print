@@ -1,5 +1,15 @@
 # PTA 键盘输入模拟
 
+> [!WARNING]
+> **使用前请先读 [DISCLAIMER.md](DISCLAIMER.md)（免责声明）。**
+>
+> 本项目与 PTA / pintia.cn、浙江大学、哈尔滨工业大学、DeepSeek 均无关联，未获授权或背书。
+> 仅面向个人学习与自动化输入研究；**提交内容的正确性与合规性由使用者自行负责**。
+> 若你所在课程或机构禁止 AI 辅助与自动化提交，请勿使用。
+> 通过 CDP 派发真实按键的行为可能违反平台服务条款，由此导致的账号限制或处罚与本项目作者无关。
+>
+> 下载、安装或使用即表示你已阅读并接受全部条款。若不同意，请立即停止使用并删除。
+
 把一段代码按真人的打字节奏逐字符敲进 PTA 的代码编辑器。
 
 页面收到的每一个字符都是 `isTrusted === true` 的真实键盘事件，全程不产生 `paste`，也不碰剪贴板。
@@ -372,7 +382,7 @@ Key 不对、没余额、或者填了带空格的。重新复制一遍，注意�
 | `test/unit-ai-base.mjs` | — | 接口地址拼装的九种写法 |
 
 ```
-cd "C:\Users\18125\Desktop\pta-typer"
+cd "C:\Users\18125\Desktop\pta-typer-ai"
 node test\run-check.mjs
 node test\run-cdp.mjs
 node test\run-indent.mjs
@@ -381,3 +391,9 @@ node test\unit-ai-base.mjs
 ```
 
 全跑出 `结果：通过 N，失败 0` 才算正常。
+
+## 许可与免责
+
+- 代码以 [MIT License](LICENSE) 发布。
+- 使用条款、学术诚信要求、第三方 AI 服务说明、责任限制见 [DISCLAIMER.md](DISCLAIMER.md)。
+- 再分发时请一并保留 `LICENSE` 与 `DISCLAIMER.md`。
