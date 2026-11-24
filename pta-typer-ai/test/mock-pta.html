@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -91,7 +91,7 @@ window.chrome = window.chrome || {};
 chrome.runtime = {
   id: 'mock-extension-id',
   lastError: null,
-  getManifest: () => ({ version: '1.2.0-mock' }),
+  getManifest: () => ({ version: '1.2.1-mock' }),
   sendMessage: (msg, cb) => {
     const done = (res) => setTimeout(() => cb && cb(res), 1);
     if (!msg) return done({ ok: false });
@@ -107,6 +107,17 @@ chrome.runtime = {
       const code = window.__MOCK_AI_CODE__ ||
         '```python\ntotal = int(input())\nh, rest = divmod(total, 3600)\nm, s = divmod(rest, 60)\nprint(h, m, s)\n```';
       return done({ ok: true, data: code, model: msg.cfg && msg.cfg.model });
+    }
+
+    if (msg.type === 'PTA_CLICK') {
+      try {
+        const el = document.querySelector('.CodeMirror textarea') ||
+          document.querySelector('textarea');
+        if (el) el.focus();
+        done({ ok: true });
+      }
+      catch (e) { done({ ok: false, error: String(e.message || e) }); }
+      return;
     }
 
     if (msg.type === 'PTA_KEY') {

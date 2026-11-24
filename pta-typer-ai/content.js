@@ -8,7 +8,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.2.0';
+  const VERSION = '1.2.1';
   const HOST_ID = 'pta-typer-host';
 
   const S = {
@@ -25,18 +25,50 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
   const rand = (a, b) => a + Math.random() * (b - a);
 
-  function send(msg) {
+  /* 发消息给后台。必须有超时：
+     扩展刚重载、或 debugger 会话被浏览器掐掉时，
+     Chrome 的回调可能永远不来，整个输入流程就会无声地卡死。 */
+  function send(msg, timeoutMs) {
     return new Promise((resolve) => {
+      let done = false;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(v);
+      };
+      const timer = setTimeout(
+        () => finish({ ok: false, error: '后台 8 秒没响应（扩展可能刚重载过，刷新页面再试）' }),
+        timeoutMs || 8000
+      );
       try {
         chrome.runtime.sendMessage(msg, (res) => {
           const err = chrome.runtime.lastError;
-          if (err) resolve({ ok: false, error: err.message });
-          else resolve(res || { ok: false, error: '没有响应' });
+          if (err) finish({ ok: false, error: err.message });
+          else finish(res || { ok: false, error: '没有响应' });
         });
       } catch (e) {
-        resolve({ ok: false, error: String(e && e.message || e) });
+        finish({ ok: false, error: String(e && e.message || e) });
       }
     });
+  }
+
+  /* 发一次按键，失败就重发。
+     长代码要打几分钟，中间浏览器随时可能把调试连接掐掉一次
+     （MV3 的后台脚本空转会被回收）。只要重发就能接上，
+     不重发的话整段输入就在那个字数上停住 —— 这正是
+     「600 字打到 400 字就不动了」最常见的成因。 */
+  async function keyOk(msg, tries) {
+    msg.type = 'PTA_KEY';
+    msg.sentAt = Date.now();
+    const n = tries || 3;
+    let last = null;
+    for (let i = 0; i < n; i++) {
+      last = await send(msg, 6000);
+      if (last && last.ok !== false) return last;
+      if (i < n - 1) await sleep(180 + i * 220);
+    }
+    return last || { ok: false, error: '按键发不出去' };
   }
 
   /* ---------- 编辑器定位 ---------- */
@@ -146,6 +178,51 @@
     return false;
   }
 
+  /* 把焦点死死钉在编辑器上。
+     dispatchEvent 造的鼠标事件不会被浏览器的焦点系统当真，
+     所以这里改用 CDP 发真实指针事件点一下编辑器中心。
+     打完字焦点跑到面板按钮上（就是你点「开始输入」那下留下的），
+     键盘事件就会打到按钮上，输入就串行了 —— pinFocus 专治这个。 */
+  async function pinFocus(raw) {
+    const target = focusTarget(raw);
+    if (!target) return false;
+
+    for (let i = 0; i < 3; i++) {
+      try {
+        const r = target.getBoundingClientRect();
+        if (r.width > 1 && r.height > 1) {
+          const x = r.left + r.width / 2;
+          const y = r.top + Math.min(r.height / 2, 40);
+          const res = await send({ type: 'PTA_CLICK', x, y }, 5000);
+          if (!res || !res.ok) {
+            // CDP 不通就退回合成事件，至少试一把
+            const opt = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window };
+            target.dispatchEvent(new MouseEvent('mousedown', opt));
+            target.dispatchEvent(new MouseEvent('mouseup', opt));
+            target.dispatchEvent(new MouseEvent('click', opt));
+          }
+        }
+      } catch (_) {}
+      try { window.focus(); } catch (_) {}
+      try { target.focus(); } catch (_) {}
+      await sleep(90);
+
+      const ae = document.activeElement;
+      if (ae === target || (target.contains && target.contains(ae))) return true;
+    }
+    return false;
+  }
+
+  /* 焦点还在不在编辑器里。每打一批字就查一次，
+     不在了说明有东西把焦点抢走了，必须重新钉住，
+     否则后面的字全打到别的地方去。 */
+  function focusHeld(raw) {
+    const target = focusTarget(raw);
+    if (!target) return false;
+    const ae = document.activeElement;
+    return ae === target || (target.contains && target.contains(ae));
+  }
+
   /* ---------- 打字节奏 ---------- */
 
   /* 节奏设计的目标不是「快」，是「像人」：
@@ -240,7 +317,7 @@
     const count = () => editorText(raw).split('\n').length;
     const before = count();
     for (let i = 0; i < 3; i++) {
-      const r = await send({ type: 'PTA_KEY', key: 'Enter' });
+      const r = await keyOk({ key: 'Enter' });
       if (r && r.ok === false) return r;
       await sleep(Math.max(150, rand(110, 240) * S.speed));
       if (count() > before) return { ok: true };
@@ -258,34 +335,34 @@
     const cur0 = lineAt(raw, li);
     if (cur0 === want) return true;
 
-    await send({ type: 'PTA_KEY', key: 'CtrlHome' });
+    await keyOk({ key: 'CtrlHome' });
     await sleep(70);
     // 走到第 li 行
     for (let i = 0; i < li; i++) {
-      await send({ type: 'PTA_KEY', key: 'End' });
+      await keyOk({ key: 'End' });
       await sleep(22);
-      await send({ type: 'PTA_KEY', key: 'ArrowRight' });
+      await keyOk({ key: 'ArrowRight' });
       await sleep(22);
     }
     // 选中整行到行尾
-    await send({ type: 'PTA_KEY', key: 'Home', times: 2 });
+    await keyOk({ key: 'Home', times: 2 });
     await sleep(70);
-    await send({ type: 'PTA_KEY', key: 'ShiftEnd' });
+    await keyOk({ key: 'ShiftEnd' });
     await sleep(60);
-    await send({ type: 'PTA_KEY', key: 'Delete' });
+    await keyOk({ key: 'Delete' });
     await sleep(90);
 
     // 逐字符重打。不能用整串插入：PTA 会把「一次进来一整行」当成粘贴，
     // 弹「禁止复制粘贴」。
     const ind = indentOf(want);
     if (ind > 0) {
-      await send({ type: 'PTA_KEY', ch: ' '.repeat(ind) });
+      await keyOk({ ch: ' '.repeat(ind) });
       await sleep(60 + ind * 12);
     }
     const body = want.slice(ind);
     for (let k = 0; k < body.length; k++) {
       if (S.stopFlag) return false;
-      await send({ type: 'PTA_KEY', ch: body[k] });
+      await keyOk({ ch: body[k] });
       await sleep(rand(10, 26));
     }
     await sleep(110);
@@ -301,19 +378,19 @@
 
     if (cur < target) {
       const need = target - cur;
-      await send({ type: 'PTA_KEY', ch: ' '.repeat(need) });
+      await keyOk({ ch: ' '.repeat(need) });
       await sleep(40 + need * 9);
     } else {
       // 编辑器补多了：回到行首，先跨过要保留的那几个空格，再把后面的删掉
       // 注意 CodeMirror 的 Home 是 smartHome：第一次跳到第一个非空白字符，
       // 再按一次才到真正的行首，所以要连按两次。
-      await send({ type: 'PTA_KEY', key: 'Home', times: 2 });
+      await keyOk({ key: 'Home', times: 2 });
       await sleep(90);
       if (target > 0) {
-        await send({ type: 'PTA_KEY', key: 'ArrowRight', times: target });
+        await keyOk({ key: 'ArrowRight', times: target });
         await sleep(35 + target * 9);
       }
-      await send({ type: 'PTA_KEY', key: 'Delete', times: cur - target });
+      await keyOk({ key: 'Delete', times: cur - target });
       await sleep(70 + (cur - target) * 12);
     }
 
@@ -321,13 +398,13 @@
     // 补的空格可能和编辑器自己的自动缩进撞上，变成两倍。
     // 这里再量一次，多了就删掉多出来的那部分。
     if (cur > target) {
-      await send({ type: 'PTA_KEY', key: 'Home', times: 2 });
+      await keyOk({ key: 'Home', times: 2 });
       await sleep(90);
       if (target > 0) {
-        await send({ type: 'PTA_KEY', key: 'ArrowRight', times: target });
+        await keyOk({ key: 'ArrowRight', times: target });
         await sleep(35 + target * 9);
       }
-      await send({ type: 'PTA_KEY', key: 'Delete', times: cur - target });
+      await keyOk({ key: 'Delete', times: cur - target });
       await sleep(80 + (cur - target) * 12);
       cur = indentOf(lineAt(raw, lineIndex));
     }
@@ -343,12 +420,12 @@
     const target = focusTarget(raw);
     if (!target) { log('✗ 找不到可以打字的元素'); return false; }
 
-    const ok = await ensureFocus(raw);
+    const ok = await pinFocus(raw) || await ensureFocus(raw);
     if (!ok) {
       log('⚠ 点不进编辑器（focus 失败），先手动点一下代码区，再点开始');
       return false;
     }
-    log('✓ 已经聚焦到编辑器');
+    log('✓ 已经聚焦到编辑器，开始逐字输入');
 
     const clean = code.replace(/\r/g, '');
     const lines = clean.split('\n');
@@ -360,6 +437,12 @@
     let indentFixed = 0;
     let lineFixes = 0;
     let spaceFixed = 0;
+    /* 进度看门狗：每隔几十个字核对一次编辑器里的真实字数。
+       浏览器把调试连接掐掉之后，按键会「发出去但没人接」——
+       流程不会报错，只会一直等到天荒地老，看着就像卡在某个字数不动。 */
+    let lastCheck = 0;
+    let lastLen = -1;
+    let stuckTimes = 0;
 
     for (let li = 0; li < lines.length; li++) {
       if (S.stopFlag) { log(`⏹ 手动停止，已输入 ${S.typed} / ${S.total} 字`); return false; }
@@ -393,6 +476,19 @@
       // 正文
       for (let k = 0; k < body.length; k++) {
         if (S.stopFlag) { log(`⏹ 手动停止，已输入 ${S.typed} / ${S.total} 字`); return false; }
+
+        /* 每 25 个字复查一次焦点。
+           焦点被别的东西抢走（点面板、切窗口、PTA 自己弹提示）之后，
+           键盘事件就打不到编辑器里了，字会跑到别处去 —— 这就是「串行」。 */
+        if (k > 0 && k % 25 === 0 && !focusHeld(raw)) {
+          log(`  ⚠ 焦点跑了（第 ${li + 1} 行第 ${k} 字），重新点回编辑器`);
+          if (!(await pinFocus(raw))) {
+            log(`✗ 抢不回焦点，已输入 ${sent} 字。手动点一下代码区，再点「开始输入」继续`);
+            failKey({ error: '焦点被抢走且抢不回来' }, sent);
+            return false;
+          }
+        }
+
         const ch = body[k];
         if (ch === ' ') state.spaceRun++; else state.spaceRun = 0;
 
@@ -401,21 +497,21 @@
           // 但打完立刻量这一行的长度：正常只多 1 个字符，
           // 多 2 个就是被编辑器插成两个了，当场按 Backspace 删回去。
           const before = lineAt(raw, li).length;
-          const r = await send({ type: 'PTA_KEY', ch: ' ' });
+          const r = await keyOk({ ch: ' ' });
           if (r && r.ok === false) { failKey(r, sent); return false; }
           await sleep(34);
 
           const extra = lineAt(raw, li).length - before - 1;
           if (extra > 0 && extra <= 3) {
             for (let j = 0; j < extra; j++) {
-              await send({ type: 'PTA_KEY', key: 'Backspace' });
+              await keyOk({ key: 'Backspace' });
               await sleep(14);
             }
             spaceFixed += extra;
             log(`  空格被插成 ${extra + 1} 个，已回删 ${extra} 个`);
           }
         } else {
-          const r = await send({ type: 'PTA_KEY', ch });
+          const r = await keyOk({ ch });
           if (r && r.ok === false) { failKey(r, sent); return false; }
         }
 
@@ -428,6 +524,28 @@
       // 这一行打完当场校验：内容和缩进都要对。不对就整行重写，
       // 免得错位一路带到后面几十行去。
       await sleep(120);
+
+      /* 看门狗：整篇字数有没有涨。
+         连两次没涨就是按键已经打不进去了，别再傻等。 */
+      if (sent - lastCheck >= 40) {
+        const nowLen = editorText(raw).replace(/\r/g, '').trimEnd().length;
+        if (lastLen >= 0 && nowLen <= lastLen) {
+          stuckTimes++;
+          log(`  ⚠ 字数停在 ${nowLen}（目标是 ${clean.trimEnd().length}），第 ${stuckTimes} 次没进展`);
+          if (stuckTimes >= 2) {
+            log(`✗ 输入卡死了：编辑器停在 ${nowLen} 字，再打也不增长`);
+            log('  → 通常是浏览器把调试连接掐了（顶部黄色提示条被点掉，或者页面重载过）');
+            log('  → 刷新页面、到 chrome://extensions 重新加载扩展，再点「开始输入」');
+            failKey({ error: '按键打不进去了' }, sent);
+            return false;
+          }
+        } else {
+          stuckTimes = 0;
+        }
+        lastLen = nowLen;
+        lastCheck = sent;
+      }
+
       if (lineAt(raw, li) !== line) {
         const got = lineAt(raw, li);
         log(`  ⚠ 第 ${li + 1} 行不对，整行重写`);
@@ -544,9 +662,9 @@
 
     await ensureFocus(raw);
     // 全选之后光标停在选区末尾，用 Ctrl+Home 跳回文档第一个字符
-    await send({ type: 'PTA_KEY', key: 'CtrlA' });
+    await keyOk({ key: 'CtrlA' });
     await sleep(90);
-    await send({ type: 'PTA_KEY', key: 'CtrlHome' });
+    await keyOk({ key: 'CtrlHome' });
     await sleep(110);
 
     const cur0 = indentOf(lineAt(raw, 0));
@@ -566,9 +684,9 @@
       }
       if (after !== want) report.push(`    第 ${li + 1} 行：还是 ${after}（想要 ${want}）`);
       if (li < lines.length - 1) {
-        await send({ type: 'PTA_KEY', key: 'End' });
+        await keyOk({ key: 'End' });
         await sleep(45);
-        await send({ type: 'PTA_KEY', key: 'ArrowRight' });
+        await keyOk({ key: 'ArrowRight' });
         await sleep(35);
       }
     }
@@ -604,18 +722,18 @@
     const before = editorText(raw).length;
     if (!before) { log('编辑器本来就是空的'); return; }
 
-    await send({ type: 'PTA_KEY', key: 'CtrlA' });
+    await keyOk({ key: 'CtrlA' });
     await sleep(rand(90, 160));
-    await send({ type: 'PTA_KEY', key: 'Backspace' });
+    await keyOk({ key: 'Backspace' });
     await sleep(rand(180, 320));
 
     let after = editorText(raw).length;
     let guard = 0;
     while (after > 0 && guard < 5) {
       guard++;
-      await send({ type: 'PTA_KEY', key: 'CtrlA' });
+      await keyOk({ key: 'CtrlA' });
       await sleep(70);
-      await send({ type: 'PTA_KEY', key: 'Backspace' });
+      await keyOk({ key: 'Backspace' });
       await sleep(200);
       after = editorText(raw).length;
     }
@@ -747,7 +865,15 @@
       '5. 只用标准库，不要 import 第三方包。',
       '6. 注意边界：空输入、单个元素、极值、0、负数、重复元素。',
       '7. 题目里如果写了「使用循环」「不能用公式」这类约束，必须遵守，判题器可能会检查源码。',
-      '8. 变量名用正常英文，不要用拼音。'
+      '8. 变量名用正常英文，不要用拼音。',
+      '',
+      '代码要短，越短越好 —— 这段代码之后要一个字一个字敲进编辑器，多打一行都是成本：',
+      '· 能一行写完就别拆两行（比如 a, b = map(int, input().split())）。',
+      '· 不要写注释，不要写类型标注，不要写 main 函数和 if __name__ == "__main__" 那套壳。',
+      '· 不要写异常处理、不要打印中间过程、不要留调试代码。',
+      '· 不要重复计算，不要为了「可读性」加中间变量。',
+      '· 能用内置函数（sum/max/min/sorted/divmod/enumerate/zip）就别手写循环。',
+      '· 通常 5 到 15 行就能解决，超过 25 行说明你写复杂了，重新想一遍再输出。'
     ].join('\n');
 
     const user = [
@@ -756,7 +882,7 @@
       '题目内容：',
       problemText,
       '',
-      '请给出完整、可直接提交的 Python 代码。'
+      '请给出完整、可直接提交的 Python 代码。记住：越短越好，不写注释、不写 main 壳子。'
     ].join('\n');
 
     return [
@@ -1063,6 +1189,16 @@
       </div>
     `;
     document.documentElement.appendChild(host);
+
+    /* 面板按钮不抢焦点。
+       点「开始输入」之后浏览器会把焦点给那个按钮，接着 CDP 敲出来的
+       每个字就都打在这个按钮上 —— 表现就是输入串行、内容跑到面板那一行去。
+       两个办法一起用：buttons 不可 tab 到，且按下时不抢焦点。 */
+    root.addEventListener('mousedown', (e) => {
+      const t = e.target;
+      if (t && t.closest && t.closest('button')) e.preventDefault();
+    }, true);
+    root.querySelectorAll('button').forEach((b) => { b.tabIndex = -1; });
 
     const $ = (id) => root.getElementById(id);
     ui = {

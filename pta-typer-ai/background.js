@@ -174,8 +174,53 @@ async function selectAll(tabId) {
   await dbgSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', ...base });
 }
 
+/* 真正的鼠标点击。合成事件（dispatchEvent）骗不过 focus 相关的逻辑：
+   浏览器只认真实指针事件才会把「用户点过这里」记到焦点系统里。
+   坐标是视口坐标，左键单击一次。 */
+async function clickAt(tabId, x, y) {
+  const base = {
+    x: Math.round(x), y: Math.round(y),
+    modifiers: 0, pointerType: 'mouse', button: 'left', clickCount: 1
+  };
+  // 先移个位再落点：不少前端框架要看到 pointermove 才认为鼠标真的进来了
+  await dbgSend(tabId, 'Input.dispatchMouseEvent',
+    Object.assign({ type: 'mouseMoved' }, base, { x: Math.round(x) - 3, y: Math.round(y) - 2 }));
+  await dbgSend(tabId, 'Input.dispatchMouseEvent', Object.assign({ type: 'mouseMoved' }, base));
+  await dbgSend(tabId, 'Input.dispatchMouseEvent', Object.assign({ type: 'mousePressed', buttons: 1 }, base));
+  await dbgSend(tabId, 'Input.dispatchMouseEvent', Object.assign({ type: 'mouseReleased', buttons: 0 }, base));
+}
+
+/* 带自动重连的发送。
+   长代码要打好几分钟，中间浏览器可能把调试会话回收掉
+   （MV3 的 service worker 空转会被杀，杀完 attachedTab 状态就丢了）。
+   报错一般是 "Debugger is not attached to the tab"，这种情况下
+   强制 detach 再 attach 一次，然后原样重试 —— 不重试的话
+   输入就会在某个字数上无声地停住。 */
+async function withDebugger(tabId, fn, retries) {
+  const n = retries == null ? 2 : retries;
+  let lastErr = null;
+  for (let i = 0; i <= n; i++) {
+    try {
+      await dbgAttach(tabId);
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      const msg = String(e && e.message || e);
+      const retriable = /not attached|Detached|Target closed|No target|Cannot access|could not be found/i.test(msg);
+      if (i >= n || !retriable) throw e;
+      attachedTab = null;
+      try { await chrome.debugger.detach({ tabId }); } catch (_) {}
+      await new Promise((r) => setTimeout(r, 320 + i * 220));
+    }
+  }
+  throw lastErr;
+}
+
 async function handleKey(tabId, msg) {
-  await dbgAttach(tabId);
+  await withDebugger(tabId, () => doKey(tabId, msg));
+}
+
+async function doKey(tabId, msg) {
   // 整串一次插入：等价于输入法上屏，inputType 是 insertText，
   // 不产生 paste。逐字符打会被编辑器的自动行为放大（空格变两个），
   // 修错行的时候用这条路最稳。
@@ -287,6 +332,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.type === 'PTA_KEY') {
     if (tabId == null) { sendResponse({ ok: false, error: '拿不到标签页 ID' }); return false; }
     handleKey(tabId, msg)
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e && e.message || e) }));
+    return true;
+  }
+
+  if (msg && msg.type === 'PTA_CLICK') {
+    if (tabId == null) { sendResponse({ ok: false, error: '拿不到标签页 ID' }); return false; }
+    dbgAttach(tabId)
+      .then(() => clickAt(tabId, Number(msg.x) || 0, Number(msg.y) || 0))
       .then(() => sendResponse({ ok: true }))
       .catch((e) => sendResponse({ ok: false, error: String(e && e.message || e) }));
     return true;
